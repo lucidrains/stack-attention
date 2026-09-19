@@ -15,10 +15,16 @@ def test_stack_trans_layer(
 
     layer = StackTransLayer(256)
 
-    out = layer(
+    out1, state = layer(
         tokens,
         stochastic_action = stochastic_action,
         hard_action = hard_action
     )
 
-    assert out.shape == tokens.shape
+    out2, state = layer(
+        tokens,
+        stochastic_action = stochastic_action,
+        hard_action = hard_action
+    )
+
+    assert out1.shape == out2.shape == tokens.shape
