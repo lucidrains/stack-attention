@@ -27,3 +27,12 @@ For following a line of research that augments attention with a differentiable s
     url      = {https://arxiv.org/abs/2507.15343}, 
 }
 ```
+
+```bibtex
+@inproceedings{joulin2015inferring,
+    author    = {Armand Joulin and Tom{\'a}{\v{s}} Mikolov},
+    title     = {Inferring Algorithmic Patterns with Stack-Augmented Recurrent Nets},
+    booktitle = {Advances in Neural Information Processing Systems 28 (NIPS 2015)},
+    year      = {2015}
+}
+```
