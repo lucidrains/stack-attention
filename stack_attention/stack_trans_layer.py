@@ -31,6 +31,9 @@ def log(t, eps = 1e-20):
 def gumbel_noise_like(t):
     return -log(-log(torch.rand_like(t)))
 
+def straight_through(src, tgt):
+    return src + (tgt - src).detach()
+
 # classes
 
 class StackTransLayer(Module):
@@ -54,6 +57,7 @@ class StackTransLayer(Module):
         num_actions = 3 # (push, pop, noop)
         self.to_action_logits = LinearNoBias(dim, num_stacks * num_actions)
         self.split_action_logits = Rearrange('... (num_stacks num_actions) -> ... num_stacks num_actions', num_actions = num_actions)
+        self.num_actions = num_actions
 
         # to hidden per stack for maybe push
 
@@ -70,7 +74,8 @@ class StackTransLayer(Module):
         tokens,
         stack_states = None,
         action_temperature = 1.,
-        stochastic_action = False
+        stochastic_action = False,
+        hard_action = False
     ):
         orig = tokens
 
@@ -86,11 +91,18 @@ class StackTransLayer(Module):
         # the actions per stack per token
 
         action_logits = self.to_action_logits(tokens)
+        action_logits = self.split_action_logits(action_logits)
+        action_logits = action_logits / action_temperature
 
         if stochastic_action:
             action_logits = action_logits + gumbel_noise_like(action_logits)
 
-        actions = (action_logits / action_temperature).softmax(dim = -1)
+        actions = action_logits.softmax(dim = -1)
+
+        if hard_action:
+            soft_actions = actions
+            hard_actions = F.one_hot(actions.argmax(dim = -1), self.num_actions)
+            actions = straight_through(soft_actions, hard_actions)
 
         # stack related logic (todo ...)
 
