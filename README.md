@@ -5,14 +5,16 @@ For following a line of research that augments attention with a differentiable s
 ## Install
 
 ```bash
-$ pip install stack-attention
+$ pip install stack-attention-pytorch
 ```
 
 ## Usage
 
+### StackTransLayer
+
 ```python
 import torch
-from stack_attention.stack_trans_layer import StackTransLayer
+from stack_attention import StackTransLayer
 
 tokens = torch.randn(2, 512, 256)
 
