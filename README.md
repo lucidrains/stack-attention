@@ -18,16 +18,11 @@ tokens = torch.randn(2, 512, 256)
 
 layer = StackTransLayer(256)
 
-out1, state = layer(
-    tokens,
-    stochastic_action = stochastic_action,
-    hard_action = hard_action
-)
+out1, state = layer(tokens)
 
 out2, state = layer(
     tokens,
-    stochastic_action = stochastic_action,
-    hard_action = hard_action
+    stack_states = state
 )
 
 assert out1.shape == out2.shape == tokens.shape

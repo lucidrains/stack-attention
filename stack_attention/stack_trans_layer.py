@@ -96,9 +96,9 @@ class StackTransLayer(Module):
         # maybe combining with residual
 
         self.add_residual = add_residual
-        learned_residual_gate &= add_residual
+        self.learned_residual_gate = learned_residual_gate and add_residual
 
-        self.residual_scale = Parameter(tensor(0.)) if learned_residual_gate else None
+        self.residual_scale = Parameter(tensor(0.)) if self.learned_residual_gate else None
 
     def forward(
         self,
@@ -191,7 +191,7 @@ class StackTransLayer(Module):
         read_stack_attn_logits = self.to_read_stack_attn(next_stack_with_null)
         read_stack_attn_logits = rearrange(read_stack_attn_logits, '... 1 -> ...')
 
-        read_stack_attn_logits = read_stack_attn_logits.masked_fill(next_mask_with_null, mask_value(next_stack_with_null))
+        read_stack_attn_logits = read_stack_attn_logits.masked_fill(~next_mask_with_null, mask_value(next_stack_with_null))
 
         read_stack_attn = read_stack_attn_logits.softmax(dim = -1)
 
@@ -199,7 +199,7 @@ class StackTransLayer(Module):
 
         # combine heads
 
-        out = rearrange(stack_inputs, 'b h d -> b (h d)')
+        out = rearrange(read_stack_out, 'b h d -> b (h d)')
 
         out = self.combine(out)
 
@@ -208,6 +208,7 @@ class StackTransLayer(Module):
         # maybe add residual
 
         if self.add_residual:
-            out = out + residual * self.residual_scale.exp()
+            residual_scale = self.residual_scale.exp() if exists(self.residual_scale) else 1.
+            out = out + residual * residual_scale
 
         return out, next_stack_states
