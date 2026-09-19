@@ -34,7 +34,7 @@ def test_stack_trans_layer(
 
     ret2 = layer(
         tokens,
-        stack_states = state,
+        stack_state = state,
         stochastic_action = stochastic_action,
         hard_action = hard_action,
         return_action_entropies = return_action_entropies

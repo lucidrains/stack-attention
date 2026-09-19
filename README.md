@@ -23,8 +23,8 @@ layer = StackTransLayer(256)
 out1, state = layer(tokens)
 
 out2, state = layer(
-    tokens,
-    stack_states = state
+    out1,
+    stack_state = state
 )
 
 assert out1.shape == out2.shape == tokens.shape

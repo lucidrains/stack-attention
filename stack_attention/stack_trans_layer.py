@@ -143,7 +143,7 @@ class StackTransLayer(Module):
     def forward(
         self,
         tokens,
-        stack_states: Tensor | None = None,
+        stack_state: Tensor | None = None,
         action_temperature = 1.,
         stochastic_action = False,
         hard_action = False,
@@ -169,16 +169,8 @@ class StackTransLayer(Module):
         # the mask is simply carried as one extra channel of the stack
         # but the transformer could dynamically generate this initial state as well
 
-        if exists(stack_states):
-            # backwards compatibility with the previous (stack, mask) tuple format
-
-            if isinstance(stack_states, (tuple, list)):
-                stack, stack_mask = stack_states
-                stack_states = cat((stack, stack_mask.to(stack.dtype)[..., None]), dim = -1)
-        else:
-            stack_states = torch.zeros((batch, num_stacks, stack_size, dim_stack + 1), device = device)
-
-        stack = stack_states
+        if not exists(stack_state):
+            stack_state = torch.zeros((batch, num_stacks, stack_size, dim_stack + 1), device = device)
 
         # project to stack inputs, appending a 1. into the mask channel for the pushed element
 
@@ -191,7 +183,7 @@ class StackTransLayer(Module):
         action_inputs = tokens
 
         if self.state_conditioned:
-            state_read = self.global_read(stack)
+            state_read = self.global_read(stack_state)
             action_inputs = cat((tokens, rearrange(state_read, 'b h d -> b (h d)')), dim = -1)
 
         action_logits = self.to_action_logits(action_inputs)
@@ -217,21 +209,21 @@ class StackTransLayer(Module):
 
         zeros = torch.zeros_like(stack_inputs)
 
-        stack_with_inputs, _ = pack_with_inverse((stack_inputs, stack, zeros), 'b h * d')
+        stack_with_inputs, _ = pack_with_inverse((stack_inputs, stack_state, zeros), 'b h * d')
 
         # superposition of all three possibilities, weighted summed by the action
 
         pushed_stack = stack_with_inputs[..., :-2, :]
         popped_stack = stack_with_inputs[..., 2:, :]
-        noop_stack = stack
+        noop_stack = stack_state
 
         stack_superpositions = torch.stack((pushed_stack, popped_stack, noop_stack), dim = -1)
 
-        next_stack = einsum(stack_superpositions, actions, 'b h s d a, b h a -> b h s d')
+        next_stack_state = einsum(stack_superpositions, actions, 'b h s d a, b h a -> b h s d')
 
         # global read of the updated stacks
 
-        read_stack_out = self.global_read(next_stack)
+        read_stack_out = self.global_read(next_stack_state)
 
         # combine heads
 
@@ -248,6 +240,6 @@ class StackTransLayer(Module):
             out = out + residual * residual_scale
 
         if not return_action_entropies:
-            return out, next_stack
+            return out, next_stack_state
 
-        return out, next_stack, action_entropies
+        return out, next_stack_state, action_entropies
