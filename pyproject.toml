@@ -1,6 +1,6 @@
 [project]
 name = "stack-attention-pytorch"
-version = "0.0.2"
+version = "0.0.3"
 description = "Implementation of Differentiable Stacks for augmenting Transformers / Attention"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }

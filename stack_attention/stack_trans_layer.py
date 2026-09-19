@@ -2,7 +2,7 @@ from __future__ import annotations
 from functools import partial
 
 import torch
-from torch import cat, nn, Tensor
+from torch import cat, nn, Tensor, tensor
 from torch.nn import Module, Linear, RMSNorm, Parameter
 import torch.nn.functional as F
 
@@ -58,7 +58,9 @@ class StackTransLayer(Module):
         num_stacks = 4,     # heads
         dim_stack = 16,     # dim head
         stack_size = 24,
-        prenorm = False
+        prenorm = False,
+        add_residual = True,
+        learned_residual_gate = True
     ):
         super().__init__()
 
@@ -87,9 +89,16 @@ class StackTransLayer(Module):
 
         self.null_stack = Parameter(torch.randn(dim_stack) * 1e-2)
 
-        # combine
+        # combining stack reads across number of stacks
 
         self.combine = LinearNoBias(dim_inner, dim)
+
+        # maybe combining with residual
+
+        self.add_residual = add_residual
+        learned_residual_gate &= add_residual
+
+        self.residual_scale = Parameter(tensor(0.)) if learned_residual_gate else None
 
     def forward(
         self,
@@ -101,7 +110,7 @@ class StackTransLayer(Module):
     ):
         assert action_temperature > 0.
 
-        orig, device = tokens, tokens.device
+        residual, device = tokens, tokens.device
 
         # maybe pre norm
 
@@ -188,12 +197,17 @@ class StackTransLayer(Module):
 
         read_stack_out = einsum(next_stack_with_null, read_stack_attn, 'b h s d, b h s -> b h d')
 
-        # combine
+        # combine heads
 
         out = rearrange(stack_inputs, 'b h d -> b (h d)')
 
         out = self.combine(out)
 
         out = inverse_pack(out)
+
+        # maybe add residual
+
+        if self.add_residual:
+            out = out + residual * self.residual_scale.exp()
 
         return out, next_stack_states

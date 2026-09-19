@@ -2,6 +2,37 @@
 
 For following a line of research that augments attention with a differentiable stack, beginning with DuSell et al. at ETH Zurich
 
+## Install
+
+```bash
+$ pip install stack-attention
+```
+
+## Usage
+
+```python
+import torch
+from stack_attention.stack_trans_layer import StackTransLayer
+
+tokens = torch.randn(2, 512, 256)
+
+layer = StackTransLayer(256)
+
+out1, state = layer(
+    tokens,
+    stochastic_action = stochastic_action,
+    hard_action = hard_action
+)
+
+out2, state = layer(
+    tokens,
+    stochastic_action = stochastic_action,
+    hard_action = hard_action
+)
+
+assert out1.shape == out2.shape == tokens.shape
+```
+
 ## Citations
 
 ```bibtex
