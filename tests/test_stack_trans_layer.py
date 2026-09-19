@@ -50,3 +50,5 @@ def test_stack_trans_layer(
 
     assert out1.shape == out2.shape == tokens.shape
     assert exists(tokens.grad)
+    assert exists(layer.to_action_logits.weight.grad)
+    assert exists(layer.combine.weight.grad)

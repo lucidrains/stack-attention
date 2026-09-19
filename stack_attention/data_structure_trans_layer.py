@@ -5,9 +5,13 @@ import torch
 from torch import cat, nn, tensor
 from torch.nn import Module, Linear, RMSNorm, Parameter
 import torch.nn.functional as F
-import torch.utils._pytree as pytree
 
-from torch_einops_utils import pack_with_inverse, entropy
+from torch_einops_utils import (
+    pack_with_inverse,
+    tree_flatten_with_inverse,
+    entropy
+)
+
 from einops import einsum, rearrange
 from einops.layers.torch import Rearrange
 
@@ -41,22 +45,21 @@ def straight_through(src, tgt):
 # combine state superpositions across actions
 
 def combine_superpositions(candidates, actions):
-    if isinstance(candidates, list):
-        flat_states, spec = zip(*[pytree.tree_flatten(s) for s in candidates])
-        stacked_leaves = [torch.stack(leaves, dim = -1) for leaves in zip(*flat_states)]
-        spec = spec[0]
-    else:
-        stacked_leaves, spec = pytree.tree_flatten(candidates)
+    if not isinstance(candidates, list):
+        candidates = [candidates]
 
-    out = []
-    for leaf in stacked_leaves:
-        if leaf.dtype == torch.bool:
-            comb = einsum(leaf.float(), actions.float(), 'b h ... a, b h a -> b h ...') > 0.5
-        else:
-            comb = einsum(leaf, actions, 'b h ... a, b h a -> b h ...')
-        out.append(comb)
+    flat_states, inverses = zip(*[tree_flatten_with_inverse(s) for s in candidates])
+    stacked_leaves = [torch.stack(leaves, dim = -1) for leaves in zip(*flat_states)]
+    inverse = inverses[0]
 
-    return pytree.tree_unflatten(out, spec)
+    assert all(leaf.is_floating_point() for leaf in stacked_leaves), 'all state tensor leaves must be floating point to support differentiable superposition'
+
+    out = [
+        einsum(leaf, actions, 'b h ... a, b h a -> b h ...')
+        for leaf in stacked_leaves
+    ]
+
+    return inverse(out)
 
 # generalized layer
 
