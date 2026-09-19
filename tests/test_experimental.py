@@ -18,9 +18,10 @@ def pop(stack):
 
 # 5-action stack (push 2, push 1, noop, pop 1, pop 2)
 
+@param('return_action_entropies', (False, True))
 @param('stochastic_action', (False, True))
 @param('hard_action', (False, True))
-def test_5_action_stack(stochastic_action, hard_action):
+def test_5_action_stack(return_action_entropies, stochastic_action, hard_action):
     dim = 128
     dim_stack = 16
     stack_size = 16
@@ -46,31 +47,46 @@ def test_5_action_stack(stochastic_action, hard_action):
 
     tokens = torch.randn(2, 32, dim, requires_grad = True)
 
-    out1, state = layer(
+    ret1 = layer(
         tokens,
         stochastic_action = stochastic_action,
-        hard_action = hard_action
+        hard_action = hard_action,
+        return_action_entropies = return_action_entropies
     )
 
-    out2, state = layer(
+    if return_action_entropies:
+        out1, state, entropies1 = ret1
+        assert entropies1.shape == (2, 32, layer.num_heads)
+    else:
+        out1, state = ret1
+
+    ret2 = layer(
         tokens,
         state = state,
         stochastic_action = stochastic_action,
-        hard_action = hard_action
+        hard_action = hard_action,
+        return_action_entropies = return_action_entropies
     )
+
+    if return_action_entropies:
+        out2, state, entropies2 = ret2
+        assert entropies2.shape == (2, 32, layer.num_heads)
+        (out2.sum() + entropies2.sum()).backward()
+    else:
+        out2, state = ret2
+        out2.sum().backward()
 
     assert out1.shape == out2.shape == tokens.shape
     assert state.shape == (2 * 32, 4, stack_size, dim_stack)
-
-    out2.sum().backward()
     assert exists(tokens.grad)
 
 # dual stack vm (call stack + eval stack)
 
+@param('return_action_entropies', (False, True))
 @param('state_conditioned', (False, True))
 @param('stochastic_action', (False, True))
 @param('hard_action', (False, True))
-def test_dual_stack_vm(state_conditioned, stochastic_action, hard_action):
+def test_dual_stack_vm(return_action_entropies, state_conditioned, stochastic_action, hard_action):
     dim = 128
     dim_stack = 16
     stack_size = 16
@@ -108,21 +124,35 @@ def test_dual_stack_vm(state_conditioned, stochastic_action, hard_action):
 
     tokens = torch.randn(2, 32, dim, requires_grad = True)
 
-    out1, state = layer(
+    ret1 = layer(
         tokens,
         stochastic_action = stochastic_action,
-        hard_action = hard_action
+        hard_action = hard_action,
+        return_action_entropies = return_action_entropies
     )
 
-    out2, state = layer(
+    if return_action_entropies:
+        out1, state, entropies1 = ret1
+        assert entropies1.shape == (2, 32, layer.num_heads)
+    else:
+        out1, state = ret1
+
+    ret2 = layer(
         tokens,
         state = state,
         stochastic_action = stochastic_action,
-        hard_action = hard_action
+        hard_action = hard_action,
+        return_action_entropies = return_action_entropies
     )
+
+    if return_action_entropies:
+        out2, state, entropies2 = ret2
+        assert entropies2.shape == (2, 32, layer.num_heads)
+        (out2.sum() + entropies2.sum()).backward()
+    else:
+        out2, state = ret2
+        out2.sum().backward()
 
     assert out1.shape == out2.shape == tokens.shape
     assert len(state) == 2
-
-    out2.sum().backward()
     assert exists(tokens.grad)

@@ -6,7 +6,11 @@ from torch import cat, nn, Tensor, tensor
 from torch.nn import Module, Linear, RMSNorm, Parameter
 import torch.nn.functional as F
 
-from torch_einops_utils import pack_with_inverse, pad_right_at_dim
+from torch_einops_utils import (
+    pack_with_inverse,
+    pad_right_at_dim,
+    entropy
+)
 
 from einops import einsum, rearrange, repeat
 from einops.layers.torch import Rearrange
@@ -27,6 +31,9 @@ LinearNoBias = partial(Linear, bias = False)
 
 def exists(v):
     return v is not None
+
+def default(v, d):
+    return v if exists(v) else d
 
 # gumbel
 
@@ -60,6 +67,7 @@ class StackTransLayer(Module):
         dim_stack = 16,     # dim head
         stack_size = 24,
         state_conditioned = False,
+        return_action_entropies = False,
         prenorm = False,
         add_residual = True,
         learned_residual_gate = True
@@ -69,6 +77,8 @@ class StackTransLayer(Module):
         self.norm = RMSNorm(dim) if prenorm else nn.Identity()
 
         # action related
+
+        self.return_action_entropies = return_action_entropies
 
         num_actions = 3 # (push, pop, noop)
         dim_inner = num_stacks * dim_stack
@@ -136,9 +146,12 @@ class StackTransLayer(Module):
         stack_states: Tensor | None = None,
         action_temperature = 1.,
         stochastic_action = False,
-        hard_action = False
+        hard_action = False,
+        return_action_entropies: bool | None = None
     ):
         assert action_temperature > 0.
+
+        return_action_entropies = default(return_action_entropies, self.return_action_entropies)
 
         residual, device = tokens, tokens.device
 
@@ -190,6 +203,11 @@ class StackTransLayer(Module):
 
         actions = action_logits.softmax(dim = -1)
 
+        action_entropies = None
+        if return_action_entropies:
+            action_entropies = entropy(actions, reduce = False)
+            action_entropies = inverse_pack(action_entropies, '* h')
+
         if hard_action:
             soft_actions = actions
             hard_actions = F.one_hot(actions.argmax(dim = -1), self.num_actions)
@@ -229,4 +247,7 @@ class StackTransLayer(Module):
             residual_scale = self.residual_scale.exp() if exists(self.residual_scale) else 1.
             out = out + residual * residual_scale
 
-        return out, next_stack
+        if not return_action_entropies:
+            return out, next_stack
+
+        return out, next_stack, action_entropies

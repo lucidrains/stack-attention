@@ -7,7 +7,7 @@ from torch.nn import Module, Linear, RMSNorm, Parameter
 import torch.nn.functional as F
 import torch.utils._pytree as pytree
 
-from torch_einops_utils import pack_with_inverse
+from torch_einops_utils import pack_with_inverse, entropy
 from einops import einsum, rearrange
 from einops.layers.torch import Rearrange
 
@@ -72,6 +72,7 @@ class DataStructureTransLayer(Module):
         dim_inputs = 16,
         dim_readout = None,
         state_conditioned = False,
+        return_action_entropies = False,
         init_state = None,
         prenorm = False,
         add_residual = True,
@@ -95,6 +96,8 @@ class DataStructureTransLayer(Module):
         self.combine = LinearNoBias(num_heads * dim_readout, dim) if exists(dim_readout) else nn.Identity()
 
         # action logits (optionally state-conditioned for closed-loop control)
+
+        self.return_action_entropies = return_action_entropies
 
         self.state_conditioned = state_conditioned
         dim_action_input = dim + (num_heads * dim_readout if state_conditioned else 0)
@@ -120,8 +123,11 @@ class DataStructureTransLayer(Module):
         state = None,
         action_temperature = 1.,
         stochastic_action = False,
-        hard_action = False
+        hard_action = False,
+        return_action_entropies: bool | None = None
     ):
+        return_action_entropies = default(return_action_entropies, self.return_action_entropies)
+
         residual = tokens
 
         tokens = self.norm(tokens)
@@ -158,6 +164,11 @@ class DataStructureTransLayer(Module):
 
         actions = action_logits.softmax(dim = -1)
 
+        action_entropies = None
+        if return_action_entropies:
+            action_entropies = entropy(actions, reduce = False)
+            action_entropies = inverse_pack(action_entropies, '* h')
+
         if hard_action:
             actions = straight_through(actions, F.one_hot(actions.argmax(dim = -1), self.num_actions))
 
@@ -182,4 +193,7 @@ class DataStructureTransLayer(Module):
             scale = self.residual_scale.exp() if exists(self.residual_scale) else 1.
             out = out + residual * scale
 
-        return out, next_state
+        if not return_action_entropies:
+            return out, next_state
+
+        return out, next_state, action_entropies
