@@ -30,6 +30,29 @@ out2, state = layer(
 assert out1.shape == out2.shape == tokens.shape
 ```
 
+### DataStructureTransLayer
+
+Or declare a custom differentiable data structure
+
+```python
+from stack_attention import DataStructureTransLayer, data_structure
+
+counter = data_structure(
+    init = lambda: torch.zeros(1),
+    actions = dict(
+        inc  = lambda s: s + 1.,
+        dec  = lambda s: s - 1.,
+        noop = lambda s: s,
+    ),
+    readout = lambda s: s
+)
+
+layer = DataStructureTransLayer(dim = 256, data_structure = counter)
+
+tokens = torch.randn(2, 512, 256)
+out, state = layer(tokens, recurrent = True)
+```
+
 ## Citations
 
 ```bibtex
