@@ -2,9 +2,10 @@ from __future__ import annotations
 from functools import partial
 
 import torch
-from torch import cat, nn, Tensor, tensor
+from torch import cat, stack, nn, tensor
 from torch.nn import Module, Linear, RMSNorm, Parameter
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from torch_einops_utils import (
     pack_with_inverse,
@@ -140,37 +141,16 @@ class StackTransLayer(Module):
 
         return einsum(stack_with_null, attn, 'b h s d, b h s -> b h d')
 
-    def forward(
+    def step(
         self,
         tokens,
-        stack_state: Tensor | None = None,
+        stack_state,
         action_temperature = 1.,
         stochastic_action = False,
-        hard_action = False,
-        return_action_entropies: bool | None = None
+        hard_action = False
     ):
-        assert action_temperature > 0.
-
-        return_action_entropies = default(return_action_entropies, self.return_action_entropies)
-
-        residual, device = tokens, tokens.device
-
-        # maybe pre norm
-
+        residual = tokens
         tokens = self.norm(tokens)
-
-        tokens, inverse_pack = pack_with_inverse(tokens, '* d')
-
-        # dimensions
-
-        batch, num_stacks, stack_size, dim_stack = tokens.shape[0], self.num_stacks, self.stack_size, self.dim_stack
-
-        # handle initial stack state
-        # the mask is simply carried as one extra channel of the stack
-        # but the transformer could dynamically generate this initial state as well
-
-        if not exists(stack_state):
-            stack_state = torch.zeros((batch, num_stacks, stack_size, dim_stack + 1), device = device)
 
         # project to stack inputs, appending a 1. into the mask channel for the pushed element
 
@@ -194,11 +174,7 @@ class StackTransLayer(Module):
             action_logits = action_logits + gumbel_noise_like(action_logits)
 
         actions = action_logits.softmax(dim = -1)
-
-        action_entropies = None
-        if return_action_entropies:
-            action_entropies = entropy(actions, reduce = False)
-            action_entropies = inverse_pack(action_entropies, '* h')
+        action_entropies = entropy(actions, reduce = False)
 
         if hard_action:
             soft_actions = actions
@@ -228,10 +204,7 @@ class StackTransLayer(Module):
         # combine heads
 
         out = rearrange(read_stack_out, 'b h d -> b (h d)')
-
         out = self.combine(out)
-
-        out = inverse_pack(out)
 
         # maybe add residual
 
@@ -239,7 +212,110 @@ class StackTransLayer(Module):
             residual_scale = self.residual_scale.exp() if exists(self.residual_scale) else 1.
             out = out + residual * residual_scale
 
-        if not return_action_entropies:
-            return out, next_stack_state
+        return out, next_stack_state, actions, action_entropies, read_stack_out
 
-        return out, next_stack_state, action_entropies
+    def _forward_recurrent(
+        self,
+        tokens,
+        stack_state,
+        block_size = None,
+        checkpoint_blocks = False,
+        **step_kwargs
+    ):
+        assert tokens.ndim == 3, 'tokens must be (batch, seq, dim) for recurrent execution'
+        num_steps = tokens.shape[1]
+
+        # initial stack state
+
+        if not exists(stack_state):
+            stack_state = torch.zeros(
+                (tokens.shape[0], self.num_stacks, self.stack_size, self.dim_stack + 1),
+                device = tokens.device,
+                dtype = tokens.dtype
+            )
+
+        # unblocked runs in single chunk
+
+        if not exists(block_size) or block_size >= num_steps:
+            return self._forward_recurrent_chunk(tokens, stack_state, **step_kwargs)
+
+        # chunked recurrence with optional gradient checkpointing
+
+        outputs, entropies = [], []
+
+        chunk_forward = partial(
+            self._forward_recurrent_chunk,
+            **step_kwargs
+        )
+
+        chunk_runner = partial(checkpoint, chunk_forward, use_reentrant = False) if checkpoint_blocks else chunk_forward
+
+        for chunk in tokens.split(block_size, dim = 1):
+            chunk_out, stack_state, chunk_entropies = chunk_runner(chunk, stack_state)
+            outputs.append(chunk_out)
+            entropies.append(chunk_entropies)
+
+        return cat(outputs, dim = 1), stack_state, cat(entropies, dim = 1)
+
+    def _forward_recurrent_chunk(self, tokens, stack_state, **step_kwargs):
+        outputs, entropies = [], []
+
+        # recurrent over sequence
+
+        for step in range(tokens.shape[1]):
+            token = tokens[:, step]
+            out, stack_state, actions, action_entropy, read_stack_out = self.step(
+                token, stack_state, **step_kwargs
+            )
+            outputs.append(out)
+            entropies.append(action_entropy)
+
+        outputs = stack(outputs, dim = 1)
+        entropies = stack(entropies, dim = 1)
+
+        return outputs, stack_state, entropies
+
+    def forward(
+        self,
+        tokens,
+        stack_state = None,
+        recurrent = False,
+        block_size = None,
+        checkpoint_blocks = False,
+        action_temperature = 1.,
+        stochastic_action = False,
+        hard_action = False,
+        return_action_entropies = None
+    ):
+        assert action_temperature > 0.
+
+        return_action_entropies = default(return_action_entropies, self.return_action_entropies)
+
+        step_kwargs = dict(
+            action_temperature = action_temperature,
+            stochastic_action = stochastic_action,
+            hard_action = hard_action
+        )
+
+        # parallel is recurrent with seq len 1 on packed tokens
+
+        if not recurrent:
+            tokens, inverse_pack = pack_with_inverse(tokens, '* d')
+            tokens = rearrange(tokens, 'b d -> b 1 d')
+
+        out, stack_state, entropies = self._forward_recurrent(
+            tokens,
+            stack_state,
+            block_size = block_size,
+            checkpoint_blocks = checkpoint_blocks,
+            **step_kwargs
+        )
+
+        if not recurrent:
+            out = inverse_pack(rearrange(out, 'b 1 d -> b d'))
+            entropies = inverse_pack(rearrange(entropies, 'b 1 h -> b h'), '* h')
+
+        if not return_action_entropies:
+            return out, stack_state
+
+        return out, stack_state, entropies

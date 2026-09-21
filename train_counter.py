@@ -31,14 +31,14 @@ class CounterModel(nn.Module):
         )
         self.to_pred = nn.Linear(dim, 1)
 
+    def introspect(self, x, **kwargs):
+        tokens = self.embed(x)
+        return self.layer.introspect(tokens, **kwargs)
+
     def forward(self, x, **kwargs):
         tokens = self.embed(x)
         out, state = self.layer(tokens, recurrent = True, **kwargs)
         return self.to_pred(out).squeeze(-1), state
-
-    def introspect(self, x, **kwargs):
-        tokens = self.embed(x)
-        return self.layer.introspect(tokens, **kwargs)
 
 class RNNBaseline(nn.Module):
     def __init__(self, dim = 32):
@@ -96,6 +96,7 @@ def main():
         temperature = 1. - 0.9 * step / train_steps
 
         # counter update
+
         pred_c, _ = counter_model(x, action_temperature = temperature)
         loss_c = F.mse_loss(pred_c, target)
         opt_counter.zero_grad()
@@ -104,6 +105,7 @@ def main():
         sched_counter.step()
 
         # rnn update
+
         pred_r = rnn_model(x)
         loss_r = F.mse_loss(pred_r, target)
         opt_rnn.zero_grad()
@@ -115,7 +117,7 @@ def main():
         rnn_losses.append(loss_r.item())
 
         if (step + 1) % 200 == 0:
-            print(f"Step {step + 1:>3}/{train_steps} | Counter MSE: {loss_c.item():.4f} | RNN MSE: {loss_r.item():.4f}")
+            print(f'Step {step + 1:>3}/{train_steps} | Counter MSE: {loss_c.item():.4f} | RNN MSE: {loss_r.item():.4f}')
 
     # evaluation across lengths (including unseen out-of-distribution lengths)
 
@@ -127,7 +129,7 @@ def main():
     rnn_eval_mses = []
     eval_batch_size = 128
 
-    print("\nEvaluating length generalization (lengths 4 to 64)...")
+    print('\nEvaluating length generalization (lengths 4 to 64)...')
 
     with torch.no_grad():
         for l in eval_lengths:
@@ -143,65 +145,60 @@ def main():
             counter_eval_mses.append(mse_c)
             rnn_eval_mses.append(mse_r)
 
-            tag = "(Train Range)" if l <= max_train_len else "(OOD Extrapolation)"
-            print(f"Length {l:>2} {tag:<20} | Counter MSE: {mse_c:>8.4f} | RNN MSE: {mse_r:>8.4f}")
+            tag = '(Train Range)' if l <= max_train_len else '(OOD Extrapolation)'
+            print(f'Length {l:>2} {tag:<20} | Counter MSE: {mse_c:>8.4f} | RNN MSE: {mse_r:>8.4f}')
 
     # introspection sample on a test sequence
 
     sample_seq = torch.tensor([[1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1]], device = device)
     traj = counter_model.introspect(sample_seq)
 
-    print("\n=== Counter Introspection Trajectory on Sample Sequence ===")
-    print(f"Tokens: {sample_seq[0].tolist()} (Ground truth sum = {sample_seq.sum().item()})\n")
+    print('\n=== Counter Introspection Trajectory on Sample Sequence ===')
+    print(f'Tokens: {sample_seq[0].tolist()} (Ground truth sum = {sample_seq.sum().item()})\n')
     print(traj.summary(batch_idx = 0, head_idx = 0))
 
     # plotting charts
 
-    fig, axes = plt.subplots(1, 3, figsize = (18, 5))
+    import seaborn as sns
 
-    # plot 1: training loss
-    axes[0].plot(counter_losses, label = "Counter (DataStructureTransLayer)", color = "#10b981", alpha = 0.8)
-    axes[0].plot(rnn_losses, label = "RNN Baseline", color = "#ef4444", alpha = 0.8)
-    axes[0].set_title("Training Loss (Sequence Lengths 4-12)")
-    axes[0].set_xlabel("Optimization Step")
-    axes[0].set_ylabel("MSE Loss")
-    axes[0].set_yscale("log")
-    axes[0].grid(True, linestyle = "--", alpha = 0.5)
-    axes[0].legend()
+    sns.set_theme(style = 'whitegrid')
+    fig, (ax_train, ax_gen, ax_actions) = plt.subplots(1, 3, figsize = (18, 5))
 
-    # plot 2: length generalization
-    axes[1].plot(eval_lengths, counter_eval_mses, "o-", label = "Counter", color = "#10b981", linewidth = 2)
-    axes[1].plot(eval_lengths, rnn_eval_mses, "s--", label = "RNN Baseline", color = "#ef4444", linewidth = 2)
-    axes[1].axvspan(min_train_len, max_train_len, color = "gray", alpha = 0.15, label = "Training Length Range")
-    axes[1].set_title("Length Generalization MSE vs Sequence Length")
-    axes[1].set_xlabel("Sequence Length")
-    axes[1].set_ylabel("Test MSE Loss")
-    axes[1].set_yscale("log")
-    axes[1].grid(True, linestyle = "--", alpha = 0.5)
-    axes[1].legend()
+    # panel 1: training loss
 
-    # plot 3: action probabilities on test sequence
+    sns.lineplot(data = counter_losses, ax = ax_train, label = 'Counter (DataStructureTransLayer)', color = '#10b981', alpha = 0.8)
+    sns.lineplot(data = rnn_losses, ax = ax_train, label = 'RNN Baseline', color = '#ef4444', alpha = 0.8)
+    ax_train.set(title = 'Training Loss (Sequence Lengths 4-12)', xlabel = 'Optimization Step', ylabel = 'MSE Loss', yscale = 'log')
+    ax_train.legend()
+
+    # panel 2: length generalization
+
+    sns.lineplot(x = eval_lengths, y = counter_eval_mses, ax = ax_gen, marker = 'o', label = 'Counter', color = '#10b981', linewidth = 2)
+    sns.lineplot(x = eval_lengths, y = rnn_eval_mses, ax = ax_gen, marker = 's', label = 'RNN Baseline', color = '#ef4444', linewidth = 2, linestyle = '--')
+    ax_gen.axvspan(min_train_len, max_train_len, color = 'gray', alpha = 0.15, label = 'Training Length Range')
+    ax_gen.set(title = 'Length Generalization MSE vs Sequence Length', xlabel = 'Sequence Length', ylabel = 'Test MSE Loss', yscale = 'log')
+    ax_gen.legend()
+
+    # panel 3: action probabilities on test sequence
+
     actions_mat = traj.action_matrix(batch_idx = 0, head_idx = 0).detach().cpu().numpy()
     seq_len = sample_seq.shape[1]
-    tokens_labels = [f"tok={sample_seq[0, t].item()}" for t in range(seq_len)]
+    tokens_labels = [f'tok={sample_seq[0, t].item()}' for t in range(seq_len)]
 
-    axes[2].bar(range(seq_len), actions_mat[:, 1], label = "P(increment)", color = "#3b82f6", alpha = 0.8)
-    axes[2].bar(range(seq_len), actions_mat[:, 0], bottom = actions_mat[:, 1], label = "P(noop)", color = "#9ca3af", alpha = 0.6)
-    axes[2].set_xticks(range(seq_len))
-    axes[2].set_xticklabels(tokens_labels, rotation = 45, ha = "right")
-    axes[2].set_title("Introspection: Action Probabilities per Token")
-    axes[2].set_xlabel("Time Step (Token Value)")
-    axes[2].set_ylabel("Action Probability")
-    axes[2].set_ylim(0, 1.05)
-    axes[2].grid(True, linestyle = "--", alpha = 0.5, axis = "y")
-    axes[2].legend()
+    ax_actions.bar(range(seq_len), actions_mat[:, 1], label = 'P(increment)', color = '#3b82f6', alpha = 0.8)
+    ax_actions.bar(range(seq_len), actions_mat[:, 0], bottom = actions_mat[:, 1], label = 'P(noop)', color = '#9ca3af', alpha = 0.6)
+    ax_actions.set_xticks(range(seq_len), labels = tokens_labels, rotation = 45, ha = 'right')
+    ax_actions.set(title = 'Introspection: Action Probabilities per Token', xlabel = 'Time Step (Token Value)', ylabel = 'Action Probability', ylim = (0, 1.05))
+    ax_actions.legend()
 
+    sns.despine(fig = fig, top = True, right = True)
     plt.tight_layout()
-    chart_path = "counter_generalization.png"
+
+    chart_path = 'counter_generalization.png'
     plt.savefig(chart_path, dpi = 150)
     plt.close()
 
-    print(f"\nCharts successfully saved to {chart_path}")
+    print(f'\nCharts successfully saved to {chart_path}')
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

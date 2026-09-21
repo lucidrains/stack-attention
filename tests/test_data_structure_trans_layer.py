@@ -769,3 +769,75 @@ def test_compile_error_protections():
 
     with pytest.raises(AssertionError, match = 'expected'):
         BadShape().compile()
+
+def test_recurrent_blocks_and_checkpointing():
+    dim = 64
+    depth = 8
+    dim_stack = 16
+    batch = 2
+    seq_len = 7
+    block_size = 3
+
+    layer = DataStructureTransLayer(
+        dim = dim,
+        num_heads = 2,
+        state_conditioned = True,
+        return_action_entropies = True,
+        data_structure = Stack(depth = depth, dim = dim_stack)
+    )
+
+    tokens = torch.randn(batch, seq_len, dim)
+
+    # 1. unblocked recurrent
+    t1 = tokens.clone().requires_grad_()
+    out1, state1, ent1 = layer(t1, recurrent = True)
+    loss1 = out1.sum() + ent1.sum()
+    loss1.backward()
+
+    # 2. block-recurrent without checkpointing
+    t2 = tokens.clone().requires_grad_()
+    out2, state2, ent2 = layer(t2, recurrent = True, block_size = block_size, checkpoint_blocks = False)
+    loss2 = out2.sum() + ent2.sum()
+    loss2.backward()
+
+    # 3. block-recurrent with checkpointing
+    t3 = tokens.clone().requires_grad_()
+    out3, state3, ent3 = layer(t3, recurrent = True, block_size = block_size, checkpoint_blocks = True)
+    loss3 = out3.sum() + ent3.sum()
+    loss3.backward()
+
+    # exact match across outputs, states, entropies, and gradients
+    assert torch.allclose(out1, out2, atol = 1e-6)
+    assert torch.allclose(out1, out3, atol = 1e-6)
+    assert torch.allclose(state1, state2, atol = 1e-6)
+    assert torch.allclose(state1, state3, atol = 1e-6)
+    assert torch.allclose(ent1, ent2, atol = 1e-6)
+    assert torch.allclose(ent1, ent3, atol = 1e-6)
+    assert torch.allclose(t1.grad, t2.grad, atol = 1e-6)
+    assert torch.allclose(t1.grad, t3.grad, atol = 1e-6)
+
+def test_introspection_with_block_size():
+    dim = 64
+    depth = 8
+    dim_stack = 16
+    batch = 2
+    seq_len = 8
+    block_size = 3
+
+    layer = DataStructureTransLayer(
+        dim = dim,
+        num_heads = 2,
+        data_structure = Stack(depth = depth, dim = dim_stack)
+    )
+
+    tokens = torch.randn(batch, seq_len, dim)
+
+    traj_unblocked = layer.introspect(tokens, recurrent = True)
+    traj_blocked = layer.introspect(tokens, recurrent = True, block_size = block_size)
+
+    assert traj_blocked.seq_len == seq_len
+    assert len(traj_blocked.states) == seq_len
+    assert torch.allclose(traj_unblocked.action_probs, traj_blocked.action_probs, atol = 1e-6)
+    assert torch.allclose(traj_unblocked.readouts, traj_blocked.readouts, atol = 1e-6)
+    assert torch.allclose(traj_unblocked.outputs, traj_blocked.outputs, atol = 1e-6)
+

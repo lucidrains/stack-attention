@@ -5,6 +5,7 @@ import torch
 from torch import cat, stack, nn, tensor
 from torch.nn import Module, Linear, RMSNorm, Parameter
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from torch_einops_utils import (
     pack_with_inverse,
@@ -176,75 +177,26 @@ class DataStructureTransLayer(Module):
         readout = self.readout(next_state)
         out = self.combine(rearrange(readout, 'b h d -> b (h d)'))
 
+        # maybe add residual
+
         if self.add_residual:
             residual_scale = self.residual_scale.exp() if exists(self.residual_scale) else 1.
             out = out + residual * residual_scale
 
         return out, next_state, actions, action_entropies, readout
 
-    def forward(
+    def _forward_recurrent(
         self,
         tokens,
-        state = None,
-        recurrent = False,
-        num_recurrent_steps: int | None = None,
-        introspect = False,
-        action_temperature = 1.,
-        stochastic_action = False,
-        hard_action = False,
-        return_action_entropies: bool | None = None
+        state,
+        num_recurrent_steps,
+        introspect,
+        block_size = None,
+        checkpoint_blocks = False,
+        **step_kwargs
     ):
-        assert action_temperature > 0.
-        return_action_entropies = default(return_action_entropies, self.return_action_entropies)
+        # latent loop vs sequence recurrence
 
-        step_kwargs = dict(
-            action_temperature = action_temperature,
-            stochastic_action = stochastic_action,
-            hard_action = hard_action
-        )
-
-        if recurrent or exists(num_recurrent_steps):
-            out, state, entropies, trajectory = self._forward_recurrent(
-                tokens, state, num_recurrent_steps, introspect, **step_kwargs
-            )
-        else:
-            out, state, entropies, trajectory = self._forward_parallel(
-                tokens, state, introspect, **step_kwargs
-            )
-
-        if introspect:
-            return out, state, trajectory
-
-        if return_action_entropies:
-            return out, state, entropies
-
-        return out, state
-
-    def _forward_parallel(self, tokens, state, introspect, **step_kwargs):
-        # a single step, applied independently to every leading token
-
-        packed, inverse_pack = pack_with_inverse(tokens, '* d')
-
-        if not exists(state):
-            state = self.init_state(packed.shape[0], self.num_heads, packed.device, packed.dtype)
-
-        out, next_state, actions, entropies, readouts = self.step(packed, state, **step_kwargs)
-
-        trajectory = None
-        if introspect:
-            trajectory = IntrospectionTrajectory(
-                action_names = self.action_names,
-                action_probs = rearrange(actions, 'b h a -> b 1 h a'),
-                entropies = rearrange(entropies, 'b h -> b 1 h'),
-                readouts = rearrange(readouts, 'b h d -> b 1 h d'),
-                outputs = rearrange(out, 'b d -> b 1 d'),
-                states = [next_state],
-                data_structure = self.data_structure
-            )
-
-        return inverse_pack(out), next_state, inverse_pack(entropies, '* h'), trajectory
-
-    def _forward_recurrent(self, tokens, state, num_recurrent_steps, introspect, **step_kwargs):
         is_latent_loop = exists(num_recurrent_steps)
 
         if is_latent_loop:
@@ -257,11 +209,79 @@ class DataStructureTransLayer(Module):
             assert tokens.ndim == 3, 'tokens must be (batch, seq, dim) for recurrent execution'
             num_steps = tokens.shape[1]
 
+        # initial state
+
         if not exists(state):
             state = self.init_state(tokens.shape[0], self.num_heads, tokens.device, tokens.dtype)
 
+        # unblocked or latent loop executes in a single chunk
+
+        if is_latent_loop or not exists(block_size) or block_size >= num_steps:
+            return self._forward_recurrent_chunk(
+                tokens,
+                state,
+                is_latent_loop = is_latent_loop,
+                introspect = introspect,
+                num_steps = num_steps,
+                **step_kwargs
+            )
+
+        # chunked recurrence with optional gradient checkpointing
+
+        outputs, entropies, trajectories = [], [], []
+
+        chunk_forward = partial(
+            self._forward_recurrent_chunk,
+            is_latent_loop = False,
+            introspect = introspect,
+            **step_kwargs
+        )
+
+        chunk_runner = partial(checkpoint, chunk_forward, use_reentrant = False) if checkpoint_blocks else chunk_forward
+
+        for chunk in tokens.split(block_size, dim = 1):
+            chunk_out, state, chunk_entropies, chunk_traj = chunk_runner(chunk, state)
+
+            outputs.append(chunk_out)
+            entropies.append(chunk_entropies)
+
+            if introspect:
+                trajectories.append(chunk_traj)
+
+        outputs = cat(outputs, dim = 1)
+        entropies = cat(entropies, dim = 1)
+
+        # stitch introspection trajectories across chunks
+
+        trajectory = None
+        if introspect:
+            trajectory = IntrospectionTrajectory(
+                action_names = self.action_names,
+                action_probs = cat([t.action_probs for t in trajectories], dim = 1),
+                entropies = cat([t.entropies for t in trajectories], dim = 1),
+                readouts = cat([t.readouts for t in trajectories], dim = 1),
+                outputs = cat([t.outputs for t in trajectories], dim = 1),
+                states = sum([t.states for t in trajectories], []),
+                data_structure = self.data_structure
+            )
+
+        return outputs, state, entropies, trajectory
+
+    def _forward_recurrent_chunk(
+        self,
+        tokens,
+        state,
+        is_latent_loop = False,
+        introspect = False,
+        num_steps = None,
+        **step_kwargs
+    ):
+        num_steps = default(num_steps, tokens.shape[1])
+
         outputs, actions, entropies, readouts, states = [], [], [], [], []
         current = tokens
+
+        # recurrent over sequence or latent loop
 
         for step in range(num_steps):
             token = current if is_latent_loop else tokens[:, step]
@@ -281,6 +301,8 @@ class DataStructureTransLayer(Module):
 
         outputs = stack(outputs, dim = 1)
         entropies = stack(entropies, dim = 1)
+
+        # introspection trajectory
 
         trajectory = None
         if introspect:
@@ -304,3 +326,56 @@ class DataStructureTransLayer(Module):
 
         _, _, trajectory = self.forward(tokens, **kwargs)
         return trajectory
+
+    def forward(
+        self,
+        tokens,
+        state = None,
+        recurrent = False,
+        block_size = None,
+        checkpoint_blocks = False,
+        num_recurrent_steps = None,
+        introspect = False,
+        action_temperature = 1.,
+        stochastic_action = False,
+        hard_action = False,
+        return_action_entropies = None
+    ):
+        assert action_temperature > 0.
+        return_action_entropies = default(return_action_entropies, self.return_action_entropies)
+
+        step_kwargs = dict(
+            action_temperature = action_temperature,
+            stochastic_action = stochastic_action,
+            hard_action = hard_action
+        )
+
+        # parallel is recurrent with seq len 1 on packed tokens
+
+        is_parallel = not recurrent and not exists(num_recurrent_steps)
+
+        if is_parallel:
+            tokens, inverse_pack = pack_with_inverse(tokens, '* d')
+            tokens = rearrange(tokens, 'b d -> b 1 d')
+
+        out, state, entropies, trajectory = self._forward_recurrent(
+            tokens,
+            state,
+            num_recurrent_steps = num_recurrent_steps,
+            introspect = introspect,
+            block_size = block_size,
+            checkpoint_blocks = checkpoint_blocks,
+            **step_kwargs
+        )
+
+        if is_parallel:
+            out = inverse_pack(rearrange(out, 'b 1 d -> b d'))
+            entropies = inverse_pack(rearrange(entropies, 'b 1 h -> b h'), '* h')
+
+        if introspect:
+            return out, state, trajectory
+
+        if return_action_entropies:
+            return out, state, entropies
+
+        return out, state
