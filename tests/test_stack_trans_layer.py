@@ -149,4 +149,3 @@ def test_stack_trans_layer_blocks_and_checkpointing():
     assert torch.allclose(ent1, ent3, atol = 1e-6)
     assert torch.allclose(t1.grad, t2.grad, atol = 1e-6)
     assert torch.allclose(t1.grad, t3.grad, atol = 1e-6)
-

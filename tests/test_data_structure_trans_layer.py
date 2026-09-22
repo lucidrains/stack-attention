@@ -420,6 +420,127 @@ def test_plain_function_declaration():
     trajectory = layer.introspect(tokens)
     assert 'count=' in trajectory.summary()
 
+def test_counter_learned_mlp_readout():
+    dim = 64
+    dim_readout = 16
+
+    mlp = torch.nn.Sequential(
+        torch.nn.Linear(1, 32),
+        torch.nn.SiLU(),
+        torch.nn.Linear(32, dim_readout)
+    )
+
+    counter = data_structure(
+        init = lambda: torch.zeros(1),
+        actions = {
+            'noop': lambda state: state,
+            'increment': lambda state, item: state + item
+        },
+        readout = lambda state: state,
+        readout_transform = mlp,
+        render = lambda state: f'count={state.item():.1f}'
+    )
+
+    compiled = counter.compile()
+    assert compiled.dim_inputs == 1
+    assert compiled.dim_readout == dim_readout
+
+    layer = DataStructureTransLayer(dim = dim, num_heads = 2, data_structure = counter)
+
+    # ensure learned parameters are registered in the layer
+    mlp_param = next(mlp.parameters())
+    assert any(p is mlp_param for p in layer.parameters())
+
+    tokens = torch.randn(2, 4, dim, requires_grad = True)
+    out, state = layer(tokens, recurrent = True)
+
+    assert out.shape == (2, 4, dim)
+    assert state.shape == (2, 2, 1)
+
+    out.sum().backward()
+    assert exists(tokens.grad)
+    assert exists(mlp_param.grad)
+
+    trajectory = layer.introspect(tokens)
+    assert 'count=' in trajectory.summary()
+
+def test_counter_learned_mlp_subclass():
+    dim = 64
+    dim_readout = 16
+
+    class LearnedCounter(DataStructure):
+        def __init__(self):
+            super().__init__()
+            self.mlp = torch.nn.Sequential(
+                torch.nn.Linear(1, 32),
+                torch.nn.SiLU(),
+                torch.nn.Linear(32, dim_readout)
+            )
+
+        def init_state(self):
+            return torch.zeros(1)
+
+        @action
+        def noop(self, state):
+            return state
+
+        @action
+        def increment(self, state, item):
+            return state + item
+
+        @readout
+        def observe(self, state):
+            return self.mlp(state)
+
+    counter = LearnedCounter()
+    layer = DataStructureTransLayer(dim = dim, num_heads = 2, data_structure = counter)
+
+    assert layer.dim_inputs == 1
+    assert layer.dim_readout == dim_readout
+
+    mlp_param = next(counter.mlp.parameters())
+    assert any(p is mlp_param for p in layer.parameters())
+
+    tokens = torch.randn(2, 4, dim, requires_grad = True)
+    out, state = layer(tokens, recurrent = True)
+
+    out.sum().backward()
+    assert exists(mlp_param.grad)
+
+def test_action_as_module():
+    dim = 32
+    dim_state = 4
+
+    increment = torch.nn.Linear(dim_state, dim_state, bias = False)
+
+    counter = data_structure(
+        init = lambda: torch.zeros(dim_state),
+        actions = {
+            'noop': lambda state: state,
+            'increment': increment
+        },
+        readout = lambda state: state,
+        render = lambda state: f'count={state.sum().item():.1f}'
+    )
+
+    layer = DataStructureTransLayer(dim = dim, num_heads = 2, data_structure = counter)
+
+    assert layer.dim_inputs == dim_state
+    assert layer.dim_readout == dim_state
+
+    param = next(increment.parameters())
+    assert any(p is param for p in layer.parameters())
+
+    tokens = torch.randn(2, 3, dim, requires_grad = True)
+    out, state = layer(tokens, recurrent = True)
+
+    assert out.shape == (2, 3, dim)
+    assert state.shape == (2, 2, dim_state)
+
+    out.sum().backward()
+    assert exists(tokens.grad)
+    assert exists(param.grad)
+
 def test_inherited_actions():
     class Base(DataStructure):
         def init_state(self):
@@ -840,4 +961,3 @@ def test_introspection_with_block_size():
     assert torch.allclose(traj_unblocked.action_probs, traj_blocked.action_probs, atol = 1e-6)
     assert torch.allclose(traj_unblocked.readouts, traj_blocked.readouts, atol = 1e-6)
     assert torch.allclose(traj_unblocked.outputs, traj_blocked.outputs, atol = 1e-6)
-

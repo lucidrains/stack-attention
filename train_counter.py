@@ -14,6 +14,11 @@ counter = data_structure(
         'increment': lambda state, item: state + item
     },
     readout = lambda state: state,
+    readout_transform = nn.Sequential(
+        nn.Linear(1, 32),
+        nn.SiLU(),
+        nn.Linear(32, 16)
+    ),
     render = lambda state: f'count={state.item():.1f}'
 )
 

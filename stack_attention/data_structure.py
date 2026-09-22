@@ -6,6 +6,7 @@ import inspect
 
 import torch
 from torch import cat, Tensor
+from torch.nn import Module
 from torch_einops_utils import tree_flatten_with_inverse
 from einops import einsum, repeat
 
@@ -41,6 +42,14 @@ def action(fn = None, *, takes_item: bool | None = None):
         fn._takes_item = takes_item
 
     return fn
+
+def _action_takes_item(fn: Callable) -> bool:
+    explicit = getattr(fn, '_takes_item', None)
+    if exists(explicit):
+        return explicit
+
+    target = fn.forward if isinstance(fn, Module) else fn
+    return len(inspect.signature(target).parameters) >= 2
 
 def readout(fn):
     assert callable(fn), 'readout must be a callable'
@@ -189,18 +198,21 @@ def _compile_init_state(init_fn: Callable) -> Callable:
 
     return init_state
 
-class DataStructure:
+class DataStructure(Module):
     def __init__(
         self,
         *,
         init: Callable | None = None,
         actions: dict[str, Callable] | None = None,
         readout: Callable | None = None,
+        readout_transform: Callable | None = None,
         render: Callable | None = None,
         dim_inputs: int | None = None,
         dim_readout: int | None = None,
         vmap: bool = False
     ):
+        super().__init__()
+
         self.dim_inputs = dim_inputs
         self.dim_readout = dim_readout
         self.vmap = vmap
@@ -208,7 +220,13 @@ class DataStructure:
         self._init = init
         self._actions = actions
         self._readout = readout
+        self._readout_transform = readout_transform
         self._render = render
+
+        if exists(actions):
+            for name, act in actions.items():
+                if isinstance(act, Module):
+                    self.add_module(f'action_{name}', act)
 
     def init_state(self):
         raise NotImplementedError(f'{type(self).__name__} must define init_state, or be given init = ...')
@@ -224,10 +242,7 @@ class DataStructure:
         assert exists(readout_fn), f'{type(self).__name__} has no readout. define it with @readout, or pass readout = fn'
 
         action_fns = list(actions.values())
-        takes_item = [
-            getattr(fn, '_takes_item', len(inspect.signature(fn).parameters) >= 2)
-            for fn in action_fns
-        ]
+        takes_item = [_action_takes_item(fn) for fn in action_fns]
 
         init_fn = self._init if exists(self._init) else self.init_state
         init_state_fn = _compile_init_state(init_fn)
@@ -275,8 +290,12 @@ class DataStructure:
         dim_inputs: int,
         dim_readout: int
     ):
-        sample_state = init_state_fn(1, 1, 'cpu', torch.float32)
-        sample_inputs = torch.randn(1, 1, dim_inputs)
+        param = next(self.parameters(), None)
+        device = param.device if exists(param) else 'cpu'
+        dtype = param.dtype if exists(param) else torch.float32
+
+        sample_state = init_state_fn(1, 1, device, dtype)
+        sample_inputs = torch.randn(1, 1, dim_inputs, device = device, dtype = dtype)
 
         # 1. validate initial state leaves are floating point
 
@@ -359,27 +378,53 @@ class DataStructure:
         return actions
 
     def _collect_readout(self) -> Callable | None:
-        if exists(self._readout):
-            return self._readout
+        readout = self._readout
 
-        for klass in type(self).__mro__:
-            for name, fn in vars(klass).items():
-                if getattr(fn, '_is_readout', False):
-                    return getattr(self, name)
+        if not exists(readout):
+            readout = next((
+                getattr(self, name)
+                for klass in type(self).__mro__
+                for name, fn in vars(klass).items()
+                if getattr(fn, '_is_readout', False)
+            ), None)
 
-        return None
+        if not exists(readout):
+            return None
+
+        # maybe compose with transform on readout of state
+
+        if not exists(self._readout_transform):
+            return readout
+
+        transform = self._readout_transform
+        return lambda state: transform(readout(state))
 
     def _resolve_dims(self, init_state_fn: Callable, readout_fn: Callable) -> tuple[int | None, int | None]:
         dim_inputs, dim_readout = self.dim_inputs, self.dim_readout
 
-        if not (exists(dim_inputs) and exists(dim_readout)):
-            try:
-                sample_state = init_state_fn(1, 1, 'cpu', torch.float32)
-                sample_readout = readout_fn(sample_state)
-                assert isinstance(sample_readout, Tensor)
-                dim_readout = default(dim_readout, sample_readout.shape[-1])
-            except Exception:
-                pass
+        # early return if dimensions already explicitly set
+
+        if exists(dim_inputs) and exists(dim_readout):
+            return dim_inputs, dim_readout
+
+        # infer from sample state and readout
+
+        try:
+            param = next(self.parameters(), None)
+            device = param.device if exists(param) else 'cpu'
+            dtype = param.dtype if exists(param) else torch.float32
+
+            sample_state = init_state_fn(1, 1, device, dtype)
+            sample_readout = readout_fn(sample_state)
+            assert isinstance(sample_readout, Tensor)
+
+            dim_readout = default(dim_readout, sample_readout.shape[-1])
+
+            if isinstance(sample_state, Tensor):
+                dim_inputs = default(dim_inputs, sample_state.shape[-1])
+
+        except Exception:
+            pass
 
         dim_inputs = default(dim_inputs, dim_readout)
         return dim_inputs, dim_readout
@@ -389,6 +434,7 @@ def data_structure(
     actions: dict[str, Callable],
     readout: Callable,
     *,
+    readout_transform: Callable | None = None,
     render: Callable | None = None,
     dim: int | None = None,
     dim_inputs: int | None = None,
@@ -399,6 +445,7 @@ def data_structure(
         init = init,
         actions = actions,
         readout = readout,
+        readout_transform = readout_transform,
         render = render,
         dim_inputs = default(dim_inputs, dim),
         dim_readout = default(dim_readout, dim),

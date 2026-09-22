@@ -104,7 +104,7 @@ class DataStructureTransLayer(Module):
         self.dim_inputs = dim_inputs
         self.dim_readout = dim_readout
         self.transition = compiled.transition
-        self.readout = compiled.readout
+        self.readout = compiled.readout if not isinstance(compiled.readout, Module) else (lambda s: compiled.readout(s))
         self.init_state = compiled.init_state
 
         self.norm = RMSNorm(dim) if prenorm else nn.Identity()
